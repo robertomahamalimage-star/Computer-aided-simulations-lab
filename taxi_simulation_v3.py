@@ -263,26 +263,54 @@ class TaxiSimulation:
         rebalance_fraction: float = 0.25,
         seed: int = 1,
     ) -> None:
+        # Reject invalid inputs before they can create negative arrival rates,
+        # divisions by zero, or a simulation whose clock never advances.
+        if isinstance(fleet_size, bool) or not isinstance(fleet_size, (int, np.integer)) or fleet_size < 0:
+            raise ValueError("fleet_size must be a non-negative integer")
+        for name, value in {
+            "duration_hours": duration_hours,
+            "dt_minutes": dt_minutes,
+            "taxi_speed_kmh": taxi_speed_kmh,
+            "walking_speed_kmh": walking_speed_kmh,
+            "road_distance_factor": road_distance_factor,
+            "rebalance_interval_min": rebalance_interval_min,
+            "event_pre_window_min": event_pre_window_min,
+            "event_post_window_min": event_post_window_min,
+            "event_post_decay_tau_min": event_post_decay_tau_min,
+        }.items():
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        for name, value in {
+            "p_app": p_app,
+            "weather_intensity": weather_intensity,
+            "weather_speed_penalty": weather_speed_penalty,
+            "public_transport_availability": public_transport_availability,
+            "event_inbound_taxi_share": event_inbound_taxi_share,
+            "event_outbound_taxi_share": event_outbound_taxi_share,
+            "urban_to_hub_probability": urban_to_hub_probability,
+            "rebalance_fraction": rebalance_fraction,
+        }.items():
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
+        for name, value in {
+            "demand_multiplier": demand_multiplier,
+            "weather_demand_sensitivity": weather_demand_sensitivity,
+            "pt_demand_sensitivity": pt_demand_sensitivity,
+            "pt_road_congestion_sensitivity": pt_road_congestion_sensitivity,
+            "event_attendance": event_attendance,
+            "event_multiplier": event_multiplier,
+            "event_during_local_demand_factor": event_during_local_demand_factor,
+            "hub_congestion_window_min": hub_congestion_window_min,
+            "hub_congestion_radius_km": hub_congestion_radius_km,
+        }.items():
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
         if day_of_week not in self.VALID_DAYS:
             raise ValueError(f"day_of_week must be one of {self.VALID_DAYS}")
         if weekend is True:
             day_of_week = "Saturday"
-        if not 0.0 <= weather_intensity <= 1.0:
-            raise ValueError("weather_intensity must be in [0, 1]")
         if rain and weather_intensity == 0.0:
             weather_intensity = 0.60
-        if not 0.0 <= public_transport_availability <= 1.0:
-            raise ValueError("public_transport_availability must be in [0, 1]")
-        if event_attendance < 0:
-            raise ValueError("event_attendance must be non-negative")
-        if not 0.0 <= event_inbound_taxi_share <= 1.0:
-            raise ValueError("event_inbound_taxi_share must be in [0, 1]")
-        if not 0.0 <= event_outbound_taxi_share <= 1.0:
-            raise ValueError("event_outbound_taxi_share must be in [0, 1]")
-        if event_pre_window_min <= 0 or event_post_window_min <= 0:
-            raise ValueError("event pre/post windows must be positive")
-        if event_post_decay_tau_min <= 0:
-            raise ValueError("event_post_decay_tau_min must be positive")
 
         self.fleet_size = fleet_size
         self.duration_minutes = duration_hours * 60.0
@@ -454,11 +482,23 @@ class TaxiSimulation:
             )
 
     def _make_taxis(self) -> Dict[int, Taxi]:
-        """Distribute the initial fleet as evenly as possible across stands."""
+        """Distribute the fleet round-robin without exceeding stand capacities.
+
+        This model starts every taxi parked. A fleet larger than all available
+        parking spaces therefore needs a different initial-state model.
+        """
         taxis: Dict[int, Taxi] = {}
-        stand_ids = list(self.stands.keys())
-        for tid in range(self.fleet_size):
-            sid = stand_ids[tid % len(stand_ids)]
+        slots = [
+            sid
+            for level in range(max(s.capacity for s in self.stands.values()))
+            for sid, stand in self.stands.items()
+            if level < stand.capacity
+        ]
+        if self.fleet_size > len(slots):
+            raise ValueError(
+                f"fleet_size ({self.fleet_size}) exceeds total stand capacity ({len(slots)})"
+            )
+        for tid, sid in enumerate(slots[:self.fleet_size]):
             taxis[tid] = Taxi(
                 tid=tid,
                 pos=self.stands[sid].pos.copy(),
@@ -483,6 +523,15 @@ class TaxiSimulation:
         return min(centres, key=lambda name: float(np.linalg.norm(pos - centres[name])))
 
     # ------------------------------ time helpers -------------------------
+
+    @property
+    def step_duration(self) -> float:
+        """Minutes in the next interval, shortened at the observation horizon.
+
+        Keep the requested resolution in self.dt. Demand, walking, driving and
+        fleet-time accounting must all use the same actual interval length.
+        """
+        return max(0.0, min(self.dt, self.duration_minutes - self.current_time))
 
     @staticmethod
     def _hour_in_window(hour: float, start_hour: float, end_hour: float) -> bool:
@@ -779,11 +828,14 @@ class TaxiSimulation:
             p.stand_id = sid
             walk_dist = float(np.linalg.norm(p.origin - self.stands[sid].pos))
             p.walk_remaining = 60.0 * walk_dist / self.walking_speed_kmh
+            if p.walk_remaining <= 1e-9:
+                # A person already at the stand does not need a walking step.
+                self._arrive_walking_passenger(p, action_time=self.current_time)
 
     def generate_urban_passengers(self) -> None:
         """Generate ordinary city passengers with a non-homogeneous Poisson process."""
         for zone in self.zones:
-            lam = self.zone_rate_per_hour(zone, self.current_time) * self.dt / 60.0
+            lam = self.zone_rate_per_hour(zone, self.current_time) * self.step_duration / 60.0
             n = int(self.rng.poisson(lam))
             for _ in range(n):
                 origin = zone.sample_point(self.rng)
@@ -817,8 +869,8 @@ class TaxiSimulation:
         inbound_rate = self.event_inbound_rate_per_minute(self.current_time)
         outbound_rate = self.event_outbound_rate_per_minute(self.current_time)
 
-        n_in = int(self.rng.poisson(inbound_rate * self.dt))
-        n_out = int(self.rng.poisson(outbound_rate * self.dt))
+        n_in = int(self.rng.poisson(inbound_rate * self.step_duration))
+        n_out = int(self.rng.poisson(outbound_rate * self.step_duration))
 
         # Inbound attendees originate from ordinary city zones.  The event zone
         # is allowed too, but the origin remains a normal spatial point rather
@@ -884,8 +936,9 @@ class TaxiSimulation:
         steps = max(1, int(math.ceil(horizon_min)))
         expected = 0.0
         for k in range(steps):
-            t = minute + min(k + 0.5, horizon_min)
-            expected += self.event_outbound_rate_per_minute(t)
+            width = min(1.0, horizon_min - k)
+            t = minute + k + width / 2.0
+            expected += self.event_outbound_rate_per_minute(t) * width
         # Sum of per-minute expected demand over the forecast window converted
         # to an equivalent hourly rate.
         extra[self.event_zone] = expected * 60.0 / horizon_min
@@ -894,7 +947,7 @@ class TaxiSimulation:
     def _hub_arrivals_in_step(self, hub: TransportHub) -> List[Tuple[int, int]]:
         """Return (day_index, schedule_index) arrivals falling in this time step."""
         start = self.current_time
-        end = self.current_time + self.dt
+        end = self.current_time + self.step_duration
         first_day = int(start // 1440.0)
         last_day = int(end // 1440.0)
         arrivals: List[Tuple[int, int]] = []
@@ -1008,6 +1061,9 @@ class TaxiSimulation:
         taxi.passenger_id = passenger.pid
         taxi.target_pos = passenger.origin.copy()
         taxi.target_stand_id = None
+        if self.distance_km(taxi.pos, passenger.origin) <= 1e-9:
+            # Boarding is immediate when taxi and customer are co-located.
+            self.start_occupied_trip(taxi, passenger, action_time=self.current_time)
 
     def start_occupied_trip(
         self, taxi: Taxi, passenger: Passenger, action_time: Optional[float] = None
@@ -1025,15 +1081,19 @@ class TaxiSimulation:
         taxi.target_stand_id = None
         taxi.stand_id = None
 
-    def start_return_to_stand(self, taxi: Taxi) -> None:
-        """Send an empty taxi to the nearest stand with free parking capacity."""
-        sid = self.nearest_stand(taxi.pos, require_space=True)
-        stand = self.stands[sid]
+    def start_return_to_stand(self, taxi: Taxi, action_time: Optional[float] = None) -> None:
+        """Return to a stand, immediately if already at a suitable stand."""
+        if action_time is None:
+            action_time = self.current_time
         taxi.state = "returning"
         taxi.passenger_id = None
+        taxi.stand_id = None
+        sid = self.nearest_stand(taxi.pos, require_space=True)
+        stand = self.stands[sid]
         taxi.target_stand_id = sid
         taxi.target_pos = stand.pos.copy()
-        taxi.stand_id = None
+        if self.distance_km(taxi.pos, stand.pos) <= 1e-9:
+            self.arrive_at_stand(taxi, sid, action_time=action_time)
 
     def arrive_at_stand(self, taxi: Taxi, sid: int, action_time: float) -> None:
         """Handle an empty taxi reaching a stand."""
@@ -1057,7 +1117,7 @@ class TaxiSimulation:
 
         # Stand became full while the taxi was en route; redirect it.
         taxi.stand_id = None
-        self.start_return_to_stand(taxi)
+        self.start_return_to_stand(taxi, action_time=action_time)
 
     # ------------------------------ matching -----------------------------
 
@@ -1083,31 +1143,37 @@ class TaxiSimulation:
 
         self.app_queue = new_queue
 
+    def _arrive_walking_passenger(self, p: Passenger, action_time: float) -> None:
+        """Record arrival and serve the stand queue in FIFO order if possible."""
+        p.walk_remaining = 0.0
+        p.stand_arrival_time = action_time
+        p.status = "waiting_stand"
+        sid = int(p.stand_id)
+        stand = self.stands[sid]
+        stand.passenger_queue.append(p.pid)
+        idle_here = [
+            t for t in self.taxis.values()
+            if t.state == "idle" and t.stand_id == sid
+        ]
+        if idle_here:
+            waiting = self.passengers[stand.passenger_queue.pop(0)]
+            self.start_occupied_trip(idle_here[0], waiting, action_time=action_time)
+
     def process_walking_passengers(self) -> None:
-        """Advance walkers and place them in stand queues when they arrive."""
-        action_time = self.current_time + self.dt
+        """Advance walkers over this interval; record arrivals at its end.
+
+        Positive walking times are rounded up to the next time-step boundary.
+        Taxis have already moved over the interval, so a person boarding at its
+        end cannot retroactively ride during that same interval.
+        """
+        action_time = self.current_time + self.step_duration
         for p in self.passengers.values():
             if p.status != "walking":
                 continue
-            p.walk_remaining -= self.dt
-            if p.walk_remaining > 0:
+            p.walk_remaining -= self.step_duration
+            if p.walk_remaining > 1e-9:
                 continue
-
-            sid = int(p.stand_id)
-            p.stand_arrival_time = action_time
-            stand = self.stands[sid]
-
-            idle_here = [
-                t for t in self.taxis.values()
-                if t.state == "idle" and t.stand_id == sid
-            ]
-            if idle_here:
-                taxi = idle_here[0]
-                taxi.stand_id = None
-                self.start_occupied_trip(taxi, p, action_time=action_time)
-            else:
-                p.status = "waiting_stand"
-                stand.passenger_queue.append(p.pid)
+            self._arrive_walking_passenger(p, action_time=action_time)
 
     # ------------------------------ movement -----------------------------
 
@@ -1125,15 +1191,15 @@ class TaxiSimulation:
     def _credit_time(self, taxi: Taxi, state: str) -> None:
         """Accumulate fleet time by state."""
         if state == "idle":
-            taxi.idle_minutes += self.dt
+            taxi.idle_minutes += self.step_duration
         elif state == "to_pickup":
-            taxi.pickup_minutes += self.dt
+            taxi.pickup_minutes += self.step_duration
         elif state == "occupied":
-            taxi.occupied_minutes += self.dt
+            taxi.occupied_minutes += self.step_duration
         elif state == "returning":
-            taxi.return_minutes += self.dt
+            taxi.return_minutes += self.step_duration
         elif state == "rebalancing":
-            taxi.rebalance_minutes += self.dt
+            taxi.rebalance_minutes += self.step_duration
 
     def advance_taxis(self) -> None:
         """Move every taxi using the current, possibly changing effective speed.
@@ -1142,7 +1208,7 @@ class TaxiSimulation:
         when a shock lowers speed, the same physical leg takes more time, so a
         taxi remains unavailable for more simulation steps.
         """
-        action_time = self.current_time + self.dt
+        action_time = self.current_time + self.step_duration
 
         for taxi in self.taxis.values():
             state_at_start = taxi.state
@@ -1162,7 +1228,7 @@ class TaxiSimulation:
                 arrived = True
             else:
                 speed = self.taxi_speed_at(self.current_time, taxi.pos)
-                max_road_move = speed * self.dt / 60.0
+                max_road_move = speed * self.step_duration / 60.0
                 moved_road = min(max_road_move, road_remaining)
                 arrived = moved_road >= road_remaining - 1e-10
 
@@ -1188,7 +1254,7 @@ class TaxiSimulation:
                 p.status = "completed"
                 p.dropoff_time = action_time
                 taxi.passenger_id = None
-                self.start_return_to_stand(taxi)
+                self.start_return_to_stand(taxi, action_time=action_time)
 
             elif state_at_start in {"returning", "rebalancing"}:
                 sid = int(taxi.target_stand_id)
@@ -1267,7 +1333,8 @@ class TaxiSimulation:
             elif diff < 0:
                 surpluses.extend([z.name] * (-diff))
 
-        max_moves = max(1, int(math.floor(len(idle) * self.rebalance_fraction)))
+        # Respect the requested fraction, including zero and small fleets.
+        max_moves = int(math.floor(len(idle) * self.rebalance_fraction))
         moves = min(len(deficits), len(surpluses), max_moves)
         if moves <= 0:
             return
@@ -1299,23 +1366,25 @@ class TaxiSimulation:
     # ------------------------------ simulation ---------------------------
 
     def step(self) -> None:
-        """Execute one simulation time step."""
-        # Existing vehicles and walkers first evolve over [t, t+dt).
-        self.advance_taxis()
-        self.process_walking_passengers()
+        """Generate and dispatch at t, then evolve to t + step_duration.
 
-        # New demand appears at time t. Hub demand is kept separate from the
-        # ordinary Poisson city process because it is intentionally bursty.
+        All decisions use the state at the start of the interval. Movement and
+        positive walking completions are recorded at its end. A taxi becoming
+        idle at the end can be dispatched at the next boundary, never at t.
+        Arrivals within an interval are approximated by its start boundary.
+        """
+        interval = self.step_duration
+        if interval <= 0:
+            return
         self.generate_urban_passengers()
         self.generate_event_passengers()
         self.generate_hub_passengers()
-
-        # App passengers can be assigned immediately if an idle taxi exists.
         self.dispatch_app_queue()
-
-        # Fleet relocation uses current demand plus scheduled near-future hub demand.
         self.rebalance_fleet()
-        self.current_time += self.dt
+
+        self.advance_taxis()
+        self.process_walking_passengers()
+        self.current_time = min(self.duration_minutes, self.current_time + interval)
 
     def run(self) -> Dict[str, float]:
         """Run to the requested horizon and return performance indicators."""
@@ -1326,28 +1395,61 @@ class TaxiSimulation:
     # ------------------------------ metrics ------------------------------
 
     def metrics(self) -> Dict[str, float]:
-        """Compute passenger-service and fleet-utilization KPIs."""
-        completed = [p for p in self.passengers.values() if p.status == "completed"]
-        app_completed = [p for p in completed if p.mode == "app"]
-        stand_completed = [p for p in completed if p.mode == "stand"]
+        """Compute KPIs at the current observation time.
+
+        Waiting/access means use every passenger who has boarded, including
+        those still travelling. Walking means use everyone who reached a stand.
+        Neither is an unconditional final mean when people are still waiting.
+        Lower-bound means also include the time already spent by people whose
+        wait/walk is not finished; their final times remain unknown. Counts make
+        these populations explicit rather than silently omitting the backlog.
+        """
+        passengers = list(self.passengers.values())
+        completed = [p for p in passengers if p.status == "completed"]
+        boarded = [p for p in passengers if p.pickup_time is not None]
+        app_passengers = [p for p in passengers if p.mode == "app"]
+        stand_passengers = [p for p in passengers if p.mode == "stand"]
+        app_boarded = [p for p in app_passengers if p.pickup_time is not None]
+        stand_boarded = [p for p in stand_passengers if p.pickup_time is not None]
+        stand_arrived = [p for p in stand_passengers if p.stand_arrival_time is not None]
 
         def safe_mean(values: List[float]) -> float:
             return float(np.mean(values)) if values else float("nan")
 
-        app_wait = [p.pickup_time - p.request_time for p in app_completed]
-        stand_walk = [p.stand_arrival_time - p.request_time for p in stand_completed]
-        stand_wait = [p.pickup_time - p.stand_arrival_time for p in stand_completed]
-        total_access = [p.pickup_time - p.request_time for p in completed]
+        app_wait = [p.pickup_time - p.request_time for p in app_boarded]
+        stand_walk = [p.stand_arrival_time - p.request_time for p in stand_arrived]
+        stand_wait = [p.pickup_time - p.stand_arrival_time for p in stand_boarded]
+        total_access = [p.pickup_time - p.request_time for p in boarded]
+
+        def observed_access(p: Passenger) -> float:
+            end = p.pickup_time if p.pickup_time is not None else self.current_time
+            return end - p.request_time
+
+        app_wait_lower_bound = [observed_access(p) for p in app_passengers]
+        access_lower_bound = [observed_access(p) for p in passengers]
+        walk_lower_bound = [
+            (p.stand_arrival_time if p.stand_arrival_time is not None else self.current_time)
+            - p.request_time
+            for p in stand_passengers
+        ]
+        # This particular lower bound is for the cohort that reached a stand;
+        # passengers still walking have not yet entered a stand queue.
+        stand_wait_lower_bound = [
+            (p.pickup_time if p.pickup_time is not None else self.current_time)
+            - p.stand_arrival_time
+            for p in stand_arrived
+        ]
 
         source_access: Dict[str, List[float]] = {
             "urban": [], "station": [], "airport": [],
             "event_inbound": [], "event_outbound": [],
         }
-        for p in completed:
+        for p in boarded:
             if p.source_type in source_access:
                 source_access[p.source_type].append(p.pickup_time - p.request_time)
 
-        total_minutes = self.fleet_size * self.duration_minutes
+        # Use elapsed observation time, so intermediate metrics also reconcile.
+        total_minutes = self.fleet_size * self.current_time
         occupied_minutes = sum(t.occupied_minutes for t in self.taxis.values())
         idle_minutes = sum(t.idle_minutes for t in self.taxis.values())
         empty_minutes = sum(
@@ -1361,15 +1463,14 @@ class TaxiSimulation:
         )
         total_km = occupied_km + empty_km
 
-        waiting_app = sum(
-            1 for p in self.passengers.values() if p.status in {"waiting_app", "assigned"}
-        )
-        waiting_stand = sum(
-            1 for p in self.passengers.values() if p.status in {"walking", "waiting_stand"}
-        )
+        not_boarded_app = len(app_passengers) - len(app_boarded)
+        not_boarded_stand = len(stand_passengers) - len(stand_boarded)
+        onboard = sum(p.status == "onboard" for p in passengers)
 
         return {
             "generated": float(self.total_generated),
+            "app_generated": float(self.app_generated),
+            "stand_generated": float(self.stand_generated),
             "urban_generated": float(self.urban_generated),
             "station_generated": float(self.station_generated),
             "airport_generated": float(self.airport_generated),
@@ -1379,12 +1480,20 @@ class TaxiSimulation:
                 self.event_inbound_generated + self.event_outbound_generated
             ),
             "completed": float(len(completed)),
+            "boarded": float(len(boarded)),
+            "boarded_app": float(len(app_boarded)),
+            "boarded_stand": float(len(stand_boarded)),
+            "arrived_at_stand": float(len(stand_arrived)),
             "completion_rate": len(completed) / self.total_generated
             if self.total_generated else float("nan"),
             "avg_app_wait_min": safe_mean(app_wait),
             "avg_stand_walk_min": safe_mean(stand_walk),
             "avg_stand_wait_min": safe_mean(stand_wait),
             "avg_total_access_min": safe_mean(total_access),
+            "avg_app_wait_lower_bound_min": safe_mean(app_wait_lower_bound),
+            "avg_stand_walk_lower_bound_min": safe_mean(walk_lower_bound),
+            "avg_stand_wait_lower_bound_min": safe_mean(stand_wait_lower_bound),
+            "avg_total_access_lower_bound_min": safe_mean(access_lower_bound),
             "avg_urban_access_min": safe_mean(source_access["urban"]),
             "avg_station_access_min": safe_mean(source_access["station"]),
             "avg_airport_access_min": safe_mean(source_access["airport"]),
@@ -1401,8 +1510,14 @@ class TaxiSimulation:
             "occupied_km": occupied_km,
             "empty_km": empty_km,
             "empty_distance_share": empty_km / total_km if total_km > 0 else float("nan"),
-            "unfinished_app": float(waiting_app),
-            "unfinished_stand": float(waiting_stand),
+            "not_boarded_app": float(not_boarded_app),
+            "not_boarded_stand": float(not_boarded_stand),
+            "walking_to_stand": float(sum(p.status == "walking" for p in passengers)),
+            "waiting_at_stand": float(sum(p.status == "waiting_stand" for p in passengers)),
+            "onboard": float(onboard),
+            # Unfinished trips include customers already aboard at the horizon.
+            "unfinished_app": float(sum(p.status != "completed" for p in app_passengers)),
+            "unfinished_stand": float(sum(p.status != "completed" for p in stand_passengers)),
         }
 
 
@@ -1413,6 +1528,8 @@ class TaxiSimulation:
 
 def run_replications(label: str, n_rep: int = 5, **kwargs) -> pd.DataFrame:
     """Run independent replications and return one KPI row per replication."""
+    if isinstance(n_rep, bool) or not isinstance(n_rep, (int, np.integer)) or n_rep <= 0:
+        raise ValueError("n_rep must be a positive integer")
     rows = []
     for rep in range(n_rep):
         sim = TaxiSimulation(seed=1000 + rep, **kwargs)
@@ -1481,7 +1598,12 @@ def scenario_experiments(n_rep: int = 5) -> pd.DataFrame:
 
 
 def summarize_experiments(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate scenario replications into a concise comparison table."""
+    """Report means, replication counts and between-replication variability.
+
+    Scenarios receive equal weight per replication. Standard deviations are
+    sample standard deviations, not confidence intervals; with one replication
+    they are undefined (NaN).
+    """
     cols = [
         "generated",
         "station_generated",
@@ -1489,13 +1611,23 @@ def summarize_experiments(df: pd.DataFrame) -> pd.DataFrame:
         "event_generated",
         "completion_rate",
         "avg_app_wait_min",
+        "avg_app_wait_lower_bound_min",
+        "avg_stand_walk_min",
         "avg_stand_wait_min",
         "avg_total_access_min",
+        "not_boarded_app",
+        "not_boarded_stand",
+        "onboard",
         "availability_idle_share",
         "utilization_occupied_share",
         "empty_distance_share",
     ]
-    return df.groupby("scenario", sort=False)[cols].mean().round(3)
+    grouped = df.groupby("scenario", sort=False)
+    summary = grouped[cols].mean()
+    summary.insert(0, "replications", grouped.size())
+    for col in ("completion_rate", "avg_app_wait_min", "avg_stand_wait_min"):
+        summary[f"{col}_std"] = grouped[col].std(ddof=1)
+    return summary.round(3)
 
 
 def basic_sanity_checks() -> None:
@@ -1522,6 +1654,20 @@ def basic_sanity_checks() -> None:
     assert 0.0 <= metrics["availability_idle_share"] <= 1.0
     assert 0.0 <= metrics["utilization_occupied_share"] <= 1.0
     assert 0.0 <= metrics["empty_running_share"] <= 1.0
+    assert metrics["completed"] + metrics["unfinished_app"] + metrics["unfinished_stand"] == metrics["generated"]
+    assert metrics["completed"] + metrics["onboard"] == metrics["boarded"]
+    assert metrics["boarded"] + metrics["not_boarded_app"] + metrics["not_boarded_stand"] == metrics["generated"]
+    for p in sim.passengers.values():
+        if p.assignment_time is not None:
+            assert p.request_time <= p.assignment_time <= sim.current_time
+        if p.pickup_time is not None:
+            assert p.request_time <= p.pickup_time <= sim.current_time
+            if p.assignment_time is not None:
+                assert p.assignment_time <= p.pickup_time
+            if p.stand_arrival_time is not None:
+                assert p.stand_arrival_time <= p.pickup_time
+        if p.dropoff_time is not None:
+            assert p.pickup_time <= p.dropoff_time <= sim.current_time
 
     event_sim = TaxiSimulation(
         duration_hours=24, fleet_size=30, seed=2027, include_hubs=False,
@@ -1546,10 +1692,15 @@ if __name__ == "__main__":
     basic_sanity_checks()
     print("Sanity checks passed.\n")
 
-    results = scenario_experiments(n_rep=5)
+    n_rep = 5
+    results = scenario_experiments(n_rep=n_rep)
     summary = summarize_experiments(results)
 
-    print("Mean KPIs over 5 independent replications\n")
+    print(f"Mean KPIs over {n_rep} independent replications\n")
+    print("Waiting/access means include everyone who boarded, even if still onboard.")
+    print("Walking means include everyone who reached a stand.")
+    print("Lower bounds include time already spent by customers still waiting.")
+    print("Backlogs and sample standard deviations are reported separately.\n")
     print(summary.to_string())
 
     results.to_csv("taxi_simulation_v3_results.csv", index=False)
