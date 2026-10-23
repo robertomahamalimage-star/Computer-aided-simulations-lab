@@ -1,0 +1,8 @@
+scenario,generated,station_generated,airport_generated,event_generated,completion_rate,avg_app_wait_min,avg_stand_wait_min,avg_total_access_min,availability_idle_share,utilization_occupied_share,empty_distance_share
+Baseline + hubs,632.667,73.333,75.333,0.0,0.983,7.136,22.791,17.216,0.71,0.167,0.409
+No station/airport bursts,465.667,0.0,0.0,0.0,0.989,6.188,2.591,11.046,0.796,0.114,0.423
+Heavy rain - demand only,789.667,79.333,86.0,0.0,0.98,7.688,32.406,21.105,0.651,0.205,0.399
+Heavy rain - demand + slower taxis,789.667,79.333,86.0,0.0,0.977,15.264,36.92,27.589,0.499,0.284,0.421
+Public transport strike,919.667,74.333,82.333,0.0,0.988,13.258,19.782,20.771,0.531,0.267,0.416
+Phased large evening event,824.667,73.667,79.667,199.333,0.965,11.76,25.374,20.932,0.621,0.209,0.438
+Combined stress,1429.667,77.667,85.0,193.667,0.717,141.882,28.176,101.84,0.244,0.416,0.446
