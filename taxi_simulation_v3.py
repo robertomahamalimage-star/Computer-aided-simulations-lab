@@ -1,8 +1,5 @@
 """Extended taxi-system simulator for a mobility laboratory.
 
-The model is intentionally detailed enough to reproduce the main feedback loops
-of an urban taxi system, while remaining small enough to explain in a report.
-
 Main mechanisms
 ---------------
 * non-stationary, zone-dependent urban demand;
