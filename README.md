@@ -1,6 +1,12 @@
 # Computer-aided-simulations-lab
 
 Simulatore Python di un servizio taxi per il laboratorio di simulazione.
+
+Per il **secondo laboratorio** (rilevamento online del transitorio, intervalli
+di confidenza e studio della precisione), vedere [README_STATIONARY.md](README_STATIONARY.md).
+Il comando dedicato è `python3 taxi_stationary_lab.py`; i risultati già eseguiti
+sono in [stationary_results/report.md](stationary_results/report.md).
+
 I passeggeri possono chiamare un taxi oppure raggiungere a piedi lo stand più
 vicino. Il sistema assegna alle richieste app il taxi idle più vicino, esegue
 il viaggio e fa tornare il veicolo a uno stand con spazio disponibile.
