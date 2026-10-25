@@ -259,7 +259,21 @@ class TaxiSimulation:
         rebalance_interval_min: int = 30,
         rebalance_fraction: float = 0.25,
         seed: int = 1,
+        stationary: bool = False,
     ) -> None:
+        # Stationary input is necessary for steady-state output analysis.
+        # Require explicit choices rather than silently ignoring daily shocks
+        # or the periodic clock of the rebalancing policy. Stability of the
+        # resulting queues is a separate question; constant inputs do not prove it.
+        if stationary and (
+            include_hubs or event_zone is not None or strike or transit_disruptions
+            or rebalancing or weekend or day_of_week != "Wednesday"
+        ):
+            raise ValueError(
+                "stationary=True requires include_hubs=False, rebalancing=False, "
+                "no events/strikes/disruptions and default day/weekend settings"
+            )
+        self.stationary = stationary
         # Reject invalid inputs before they can create negative arrival rates,
         # divisions by zero, or a simulation whose clock never advances.
         if isinstance(fleet_size, bool) or not isinstance(fleet_size, (int, np.integer)) or fleet_size < 0:
@@ -642,6 +656,8 @@ class TaxiSimulation:
 
     def base_traffic_speed(self, minute: float) -> float:
         """Traffic speed before exogenous shock multipliers are applied."""
+        if self.stationary:
+            return self.taxi_speed_kmh
         hour = self.clock_hour(minute)
         if 7.0 <= hour < 9.5 or 17.0 <= hour < 19.5:
             return 20.0
@@ -748,8 +764,9 @@ class TaxiSimulation:
         Their supply-side effects are handled separately by taxi_speed_at().
         """
         hour = self.clock_hour(minute)
-        rate = zone.base_rate_per_hour * self.time_of_day_factor(hour)
-        rate *= self.day_factor(minute)
+        rate = zone.base_rate_per_hour
+        if not self.stationary:
+            rate *= self.time_of_day_factor(hour) * self.day_factor(minute)
         rate *= self.demand_multiplier
 
         # More people switch from walking/cycling/transit to taxis in bad weather.
