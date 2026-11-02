@@ -61,74 +61,6 @@ def make_plots(summary, coverage, output):
         plt.close(fig)
 
 
-def write_report(summary, pilots, coverage, output):
-    lines = [
-        "# Laboratorio: transitorio e intervalli di confidenza", "",
-        "Risultati riproducibili dello studio a domanda e velocità costanti. "
-        "Gli scenari giornalieri del primo laboratorio restano separati.", "",
-        "I piloti scelgono il tempo da scartare; le repliche di misura usano stream "
-        "indipendenti dai piloti. Gli IC sono Student-t tra medie di replica. "
-        "La stabilità rilevata è un controllo euristico, non una prova matematica. "
-        "Gli IC hanno copertura nominale, non una garanzia sul sistema taxi.", "",
-        "| Scenario | Piloti con rilevamento | Scarto (ore) | Repliche | Attesa app (min) | IC 95% (min) | Semiampiezza relativa |",
-        "| --- | ---: | ---: | ---: | ---: | --- | ---: |",
-    ]
-    for name, rows in summary.groupby("scenario", sort=False):
-        p = pilots[pilots.scenario.eq(name)]
-        successes = int(p.status.eq("detected").sum())
-        good = rows[rows.status.eq("ok") & rows.metric.eq("mean_app_wait_min")]
-        if good.empty:
-            lines.append(f"| {name} | {successes}/{len(p)} | — | — | — | {rows.iloc[-1].status} | — |")
-            continue
-        best = good.loc[good.n.idxmax()]
-        lines.append(f"| {name} | {successes}/{len(p)} | {best.deletion_minutes/60:.1f} | "
-                     f"{int(best.n)} | {best.estimate:.3f} | [{best.lower:.3f}, {best.upper:.3f}] | "
-                     f"{100*best.relative_half_width:.1f}% |")
-    lines += ["", "## Impatto sulla precisione", "",
-              "Per ciascuna configurazione il piano confronta due numerosità fissate "
-              "prima della misura. La semiampiezza descrive la precisione; "
-              "non misura direttamente il bias residuo del transitorio.", ""]
-    for name, rows in summary.groupby("scenario", sort=False):
-        good = rows[rows.status.eq("ok") & rows.metric.eq("mean_app_wait_min")].sort_values("n")
-        if len(good) == 2:
-            a, b = good.iloc[0], good.iloc[1]
-            lines.append(f"- {name}: passando da {int(a.n)} a {int(b.n)} repliche, "
-                         f"la semiampiezza passa da {a.half_width:.3f} a {b.half_width:.3f} minuti.")
-    lines += ["", "Il caso `longer_measurement` raddoppia la durata utile da 24 a 48 ore; "
-              "`shorter_detector_window` dimezza la finestra da 12 a 6 batch. "
-              "Gli altri confronti modificano flotta e carico. Per confrontare "
-              "l'accuratezza guardare gli IC, lo scarto e le mancate rilevazioni "
-              "insieme: un intervallo stretto da solo non esclude un bias.", "",
-              "I confronti di numerosità condividono il prefisso delle stesse repliche, "
-              "ma non effettuano arresto adattivo. Gli IC riportati sono marginali, "
-              "non simultanei su tutti i parametri e non IC delle differenze.", ""]
-    c = coverage.iloc[0]
-    lines += ["## Verifica con un riferimento noto", "",
-              f"Su {int(c.trials)} esperimenti M/M/1, ciascuno con {int(c.replications)} "
-              f"repliche e {int(c.customers_per_replication)} clienti per replica, "
-              f"la copertura osservata è {100*c.empirical_coverage:.1f}% "
-              f"(nominale 95%; intervallo Wilson sulla copertura "
-              f"[{100*c.coverage_wilson_lower:.1f}%, {100*c.coverage_wilson_upper:.1f}%]). "
-              f"L'attesa media teorica è 1; la stima media è {c.mean_estimate:.4f}.", "",
-              "Questa verifica usa attese correlate dentro ogni replica e una "
-              "distribuzione iniziale esattamente stazionaria. Controlla il metodo "
-              "degli IC su una coda nota; non certifica il rilevatore del transitorio "
-              "o la copertura degli IC taxi.", "",
-              "## Limiti e file", "",
-              "- `warmup_not_detected`: almeno un pilota non supera il controllo "
-              "entro l'orizzonte massimo. Non equivale da solo a una prova di instabilità.",
-              "- `incomplete_measurements`: almeno una replica del campione ha "
-              "clienti non ancora saliti a fine follow-up o una popolazione vuota. "
-              "Non si eliminano repliche fallite per ottenere un IC.",
-              "- La produzione mantiene gli arrivi durante il follow-up della "
-              "coorte; le quote di utilizzo rimangono riferite alla sola finestra utile.",
-              "- Le soglie del rilevatore sono configurabili e non garantiscono "
-              "l'assenza di transitori lenti. Aumentare durata e finestre serve come controllo di sensibilità.",
-              "- Per istruzioni e formule vedere `README_STATIONARY.md`.", "",
-              "![Precisione e copertura](precision.png)", ""]
-    (output / "report.md").write_text("\n".join(lines), encoding="utf-8")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default="stationary_results")
@@ -174,19 +106,18 @@ def main():
             frame = pd.DataFrame(columns=empty_columns[name])
         frame.to_csv(output / name, index=False)
         frames.append(frame)
-    # If every configuration fails its pilot, still export a truthful report.
+    # Keep plotting valid even if no pilot detects stability.
     summary = frames[0]
     if "metric" not in summary:
         summary["metric"] = ""
     coverage = validate_mm1_coverage(trials=args.coverage_trials)
     coverage.to_csv(output / "coverage_validation.csv", index=False)
     make_plots(summary, coverage, output)
-    write_report(summary, frames[2], coverage, output)
     metadata = dict(configurations=[asdict(c) for c in configs], python=platform.python_version(),
                     numpy=np.__version__, pandas=pd.__version__, scipy=scipy.__version__,
                     coverage_trials=args.coverage_trials)
     (output / "configuration.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    print(f"Risultati, grafico e relazione salvati in {output.resolve()}", flush=True)
+    print(f"Risultati e grafico salvati in {output.resolve()}", flush=True)
 
 
 if __name__ == "__main__":

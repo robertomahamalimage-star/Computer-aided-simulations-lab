@@ -20,7 +20,7 @@ python3 -B taxi_stationary_lab.py
 In Colab puoi clonare il ramo che contiene questo laboratorio:
 
 ```python
-!git clone --branch feat/stationary-analysis https://github.com/robertomahamalimage-star/Computer-aided-simulations-lab.git
+!git clone --branch fix/remove-report-generation https://github.com/robertomahamalimage-star/Computer-aided-simulations-lab.git
 %cd Computer-aided-simulations-lab
 %pip install -r requirements.txt
 !python taxi_stationary_lab.py
@@ -37,7 +37,11 @@ Lo studio salva in `stationary_results/`:
 | `coverage_validation.csv` | Verifica della copertura su una coda con soluzione nota |
 | `configuration.json` | Parametri, seed e versioni dei pacchetti usati |
 | `precision.png` | Grafici degli IC e della loro precisione |
-| `report.md` | Relazione in italiano con i risultati effettivamente ottenuti |
+
+Lo script salva CSV, configurazione e grafico; non genera una relazione Markdown.
+Le cartelle di vecchie esecuzioni possono contenere un `report.md` preesistente:
+quel file non viene aggiornato. Per una nuova prova usare una cartella diversa,
+per esempio `--output-dir risultati_colab`.
 
 Per eseguire un solo caso, aumentare le repliche o scegliere una cartella diversa:
 
@@ -186,9 +190,9 @@ Per ogni caso con misure complete si calcolano IC usando le prime 10 e tutte le
 - **Sensibilità al transitorio**: tempo scartato e comportamento con finestre più
   corte. Un rilevamento anticipato può lasciare bias; uno più tardivo costa tempo.
 - **Carico e flotta**: più congestione può aumentare attese e variabilità; gli IC
-  quantificano l'incertezza e i casi senza rilevamento vengono mantenuti nel report.
+  quantificano l'incertezza e i casi senza rilevamento vengono mantenuti nei CSV.
 
-I grafici e la relazione sono costruiti dai risultati effettivi; il programma
+I grafici e le tabelle CSV sono costruiti dai risultati effettivi; il programma
 non presume che ogni variazione renda necessariamente più stretto l'IC. Per
 confrontare formalmente due configurazioni con seed comuni servirebbe un IC
 delle differenze appaiate, diverso dagli IC marginali mostrati qui.
