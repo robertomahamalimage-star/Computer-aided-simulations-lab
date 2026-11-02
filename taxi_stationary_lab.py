@@ -1,8 +1,5 @@
-"""Second lab: run pilot warm-up detection, independent CIs and precision study.
 
-Usage: python3 taxi_stationary_lab.py
-Colab: clone/download this file, stationary_analysis.py and taxi_simulation_v3.py.
-"""
+
 
 import argparse
 from dataclasses import asdict, replace
