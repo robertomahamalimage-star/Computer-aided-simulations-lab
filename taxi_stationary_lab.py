@@ -40,8 +40,8 @@ def make_plots(summary, coverage, output):
         waiting = good[good.metric.eq("mean_app_wait_min")]
         for scenario, rows in waiting.groupby("scenario", sort=False):
             axes[0].plot(rows.n, rows.half_width, marker="o", label=scenario)
-        axes[0].set(xlabel="Repliche indipendenti", ylabel="Semiampiezza IC 95% (min)",
-                    title="Precisione della stima dell'attesa app")
+        axes[0].set(xlabel="Independent replicates", ylabel="Semi-amplitude IC 95% (min)",
+                    title="App wait time estimation accuracy")
         if len(waiting):
             axes[0].legend(fontsize=7)
             largest = waiting.loc[waiting.groupby("scenario").n.idxmax()]
