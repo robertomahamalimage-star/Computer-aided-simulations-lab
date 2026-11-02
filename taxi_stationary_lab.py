@@ -48,14 +48,14 @@ def make_plots(summary, coverage, output):
             y = np.arange(len(largest))
             axes[1].errorbar(largest.estimate, y, xerr=largest.half_width, fmt="o", capsize=4)
             axes[1].set_yticks(y, largest.scenario, fontsize=8)
-        axes[1].set(xlabel="Attesa app: stima e IC 95% (min)", title="Effetto dei parametri")
+        axes[1].set(xlabel="App wait time: estimate and 95% CI (min)", title="Parameter effects")
         c = coverage.iloc[0]
         axes[2].errorbar([c.empirical_coverage], [0],
                         xerr=[[c.empirical_coverage-c.coverage_wilson_lower],
                               [c.coverage_wilson_upper-c.empirical_coverage]], fmt="o", capsize=5)
-        axes[2].axvline(0.95, color="gray", linestyle="--", label="Copertura nominale 95%")
-        axes[2].set(xlim=(0.85, 1), yticks=[], xlabel="Copertura empirica M/M/1",
-                    title=f"Verifica su {int(c.trials)} esperimenti")
+        axes[2].axvline(0.95, color="gray", linestyle="--", label="95% nominal coverage")
+        axes[2].set(xlim=(0.85, 1), yticks=[], xlabel="M/M/1 empirical coverage",
+                    title=f"Verification on {int(c.trials)} experiments")
         axes[2].legend(fontsize=8)
         fig.savefig(output / "precision.png", dpi=160)
         plt.close(fig)
