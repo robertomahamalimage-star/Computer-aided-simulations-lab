@@ -1,0 +1,2 @@
+model,theoretical_mean_wait,trials,replications,customers_per_replication,nominal_coverage,empirical_coverage,coverage_wilson_lower,coverage_wilson_upper,mean_estimate,mean_half_width
+M/M/1,1.0,300,20,3000,0.95,0.9433333333333334,0.9111340419775253,0.9643225235367106,1.0015544736417783,0.04512900554190511
